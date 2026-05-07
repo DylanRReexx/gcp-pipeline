@@ -216,3 +216,26 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Airflow
+logs/
+airflow.cfg
+airflow.db*
+
+# GCP credentials
+*.json
+credentials/
+
+# dbt
+target/
+dbt_packages/
+logs/
+
+# Data
+*.csv
+*.parquet
