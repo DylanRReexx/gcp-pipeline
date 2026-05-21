@@ -1,5 +1,5 @@
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.providers.standard.operators.python import PythonOperator
 from datetime import datetime, timedelta
 import logging
 
@@ -15,10 +15,18 @@ default_args = {
 def extraer_datos(**context):
     """Extrae datos de Chicago Taxi desde BigQuery Public Datasets."""
     from google.cloud import bigquery
+    import pandas as pd
 
     client = bigquery.Client(project="savvy-kit-494301-m6")
 
-    query = """
+    # Fecha de ejecución del DAG para ingesta incremental
+    execution_date = context["data_interval_start"]
+    start_date = execution_date.strftime("%Y-%m-%d")
+    end_date = (execution_date + timedelta(days=31)).strftime("%Y-%m-%d")
+
+    logger.info(f"Extrayendo datos del {start_date} al {end_date}")
+
+    query = f"""
         SELECT
             unique_key,
             taxi_id,
@@ -36,19 +44,17 @@ def extraer_datos(**context):
             payment_type,
             company
         FROM `bigquery-public-data.chicago_taxi_trips.taxi_trips`
-        WHERE trip_start_timestamp >= '2023-01-01'
-            AND trip_start_timestamp < '2023-02-01'
+        WHERE DATE(trip_start_timestamp) >= '{start_date}'
+            AND DATE(trip_start_timestamp) < '{end_date}'
             AND fare > 0
             AND trip_miles > 0
             AND trip_seconds > 0
-        LIMIT 100000
     """
 
     logger.info("Ejecutando query en BigQuery...")
     df = client.query(query).to_dataframe()
     logger.info(f"Datos extraídos: {len(df)} filas")
 
-    # Guardar temporalmente
     df.to_csv("/tmp/taxi_raw.csv", index=False)
     logger.info("Datos guardados en /tmp/taxi_raw.csv")
     return len(df)
@@ -61,27 +67,35 @@ def validar_datos(**context):
     df = pd.read_csv("/tmp/taxi_raw.csv")
     logger.info(f"Validando {len(df)} filas...")
 
-    # Validaciones
     assert len(df) > 0, "Dataset vacío"
-    assert df["unique_key"].nunique() == len(df), "Hay duplicados en unique_key"
     assert (df["fare"] > 0).all(), "Hay tarifas negativas o cero"
     assert (df["trip_miles"] > 0).all(), "Hay distancias negativas o cero"
     assert df["trip_start_timestamp"].notnull().all(), "Hay timestamps nulos"
 
+    # Duplicados — warning en lugar de error
+    duplicados = df["unique_key"].duplicated().sum()
+    if duplicados > 0:
+        logger.warning(f"⚠ {duplicados} duplicados en unique_key — se deduplicará")
+        df = df.drop_duplicates(subset=["unique_key"])
+        logger.info(f"Filas después de deduplicar: {len(df)}")
+
+    df.to_csv("/tmp/taxi_raw.csv", index=False)
     logger.info(f"Nulos por columna:\n{df.isnull().sum()}")
-    logger.info("✅ Todas las validaciones pasaron")
+    logger.info("✅ Validaciones completadas")
     return True
 
 
 def cargar_bigquery(**context):
-    """Carga los datos procesados en BigQuery."""
+    """Carga los datos procesados en BigQuery con particionamiento."""
     import pandas as pd
     from google.cloud import bigquery
 
     df = pd.read_csv("/tmp/taxi_raw.csv")
+    df["trip_start_timestamp"] = pd.to_datetime(df["trip_start_timestamp"])
+    df["trip_end_timestamp"] = pd.to_datetime(df["trip_end_timestamp"])
+
     client = bigquery.Client(project="savvy-kit-494301-m6")
 
-    # Crear dataset si no existe
     dataset_id = "savvy-kit-494301-m6.taxi_pipeline"
     try:
         client.get_dataset(dataset_id)
@@ -92,11 +106,35 @@ def cargar_bigquery(**context):
         client.create_dataset(dataset)
         logger.info("Dataset creado")
 
-    # Cargar tabla
     table_id = f"{dataset_id}.raw_taxi_trips"
+
+    # Schema con tipos correctos
+    schema = [
+        bigquery.SchemaField("unique_key", "STRING"),
+        bigquery.SchemaField("taxi_id", "STRING"),
+        bigquery.SchemaField("trip_start_timestamp", "TIMESTAMP"),
+        bigquery.SchemaField("trip_end_timestamp", "TIMESTAMP"),
+        bigquery.SchemaField("trip_seconds", "INTEGER"),
+        bigquery.SchemaField("trip_miles", "FLOAT"),
+        bigquery.SchemaField("pickup_community_area", "FLOAT"),
+        bigquery.SchemaField("dropoff_community_area", "FLOAT"),
+        bigquery.SchemaField("fare", "FLOAT"),
+        bigquery.SchemaField("tips", "FLOAT"),
+        bigquery.SchemaField("tolls", "FLOAT"),
+        bigquery.SchemaField("extras", "FLOAT"),
+        bigquery.SchemaField("trip_total", "FLOAT"),
+        bigquery.SchemaField("payment_type", "STRING"),
+        bigquery.SchemaField("company", "STRING"),
+    ]
+
+    # Configuración con particionamiento por fecha
     job_config = bigquery.LoadJobConfig(
-        write_disposition="WRITE_TRUNCATE",
-        autodetect=True,
+        schema=schema,
+        write_disposition="WRITE_APPEND",
+        time_partitioning=bigquery.TimePartitioning(
+            type_=bigquery.TimePartitioningType.DAY,
+            field="trip_start_timestamp",
+        ),
     )
 
     job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
@@ -104,15 +142,17 @@ def cargar_bigquery(**context):
 
     tabla = client.get_table(table_id)
     logger.info(f"✅ Cargadas {tabla.num_rows} filas en {table_id}")
+    logger.info(f"✅ Tabla particionada por trip_start_timestamp")
 
 
 with DAG(
     dag_id="taxi_pipeline",
     default_args=default_args,
-    description="Chicago Taxi Pipeline — Extract, Validate, Load to BigQuery",
+    description="Chicago Taxi Pipeline — Incremental load to BigQuery partitioned table",
     schedule="@monthly",
-    start_date=datetime(2024, 1, 1),
-    catchup=False,
+    start_date=datetime(2023, 1, 1),
+    end_date=datetime(2023, 6, 1),
+    catchup=True,
     tags=["taxi", "bigquery", "gcp"],
 ) as dag:
 
