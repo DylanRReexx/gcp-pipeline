@@ -86,7 +86,7 @@ def validar_datos(**context):
 
 
 def cargar_bigquery(**context):
-    """Carga los datos procesados en BigQuery con particionamiento."""
+    """Carga los datos procesados en BigQuery usando MERGE para evitar duplicados."""
     import pandas as pd
     from google.cloud import bigquery
 
@@ -97,18 +97,18 @@ def cargar_bigquery(**context):
     client = bigquery.Client(project="savvy-kit-494301-m6")
 
     dataset_id = "savvy-kit-494301-m6.taxi_pipeline"
+    table_id = f"{dataset_id}.raw_taxi_trips"
+    staging_id = f"{dataset_id}.staging_taxi_trips"
+
+    # Crear dataset si no existe
     try:
         client.get_dataset(dataset_id)
-        logger.info("Dataset ya existe")
     except Exception:
         dataset = bigquery.Dataset(dataset_id)
         dataset.location = "US"
         client.create_dataset(dataset)
         logger.info("Dataset creado")
 
-    table_id = f"{dataset_id}.raw_taxi_trips"
-
-    # Schema con tipos correctos
     schema = [
         bigquery.SchemaField("unique_key", "STRING"),
         bigquery.SchemaField("taxi_id", "STRING"),
@@ -127,22 +127,55 @@ def cargar_bigquery(**context):
         bigquery.SchemaField("company", "STRING"),
     ]
 
-    # Configuración con particionamiento por fecha
-    job_config = bigquery.LoadJobConfig(
+    # Paso 1 — Cargar a tabla staging temporal
+    job_config_staging = bigquery.LoadJobConfig(
         schema=schema,
-        write_disposition="WRITE_APPEND",
-        time_partitioning=bigquery.TimePartitioning(
+        write_disposition="WRITE_TRUNCATE",
+    )
+    job = client.load_table_from_dataframe(df, staging_id, job_config=job_config_staging)
+    job.result()
+    logger.info(f"Staging cargado: {len(df)} filas")
+
+    # Paso 2 — Crear tabla final particionada si no existe
+    try:
+        client.get_table(table_id)
+    except Exception:
+        table = bigquery.Table(table_id, schema=schema)
+        table.time_partitioning = bigquery.TimePartitioning(
             type_=bigquery.TimePartitioningType.DAY,
             field="trip_start_timestamp",
-        ),
-    )
+        )
+        client.create_table(table)
+        logger.info("Tabla final creada con particionamiento")
 
-    job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
-    job.result()
+    # Paso 3 — MERGE para insertar solo registros nuevos
+    merge_query = f"""
+        MERGE `{table_id}` T
+        USING `{staging_id}` S
+        ON T.unique_key = S.unique_key
+        WHEN NOT MATCHED THEN
+            INSERT (
+                unique_key, taxi_id, trip_start_timestamp, trip_end_timestamp,
+                trip_seconds, trip_miles, pickup_community_area, dropoff_community_area,
+                fare, tips, tolls, extras, trip_total, payment_type, company
+            )
+            VALUES (
+                S.unique_key, S.taxi_id, S.trip_start_timestamp, S.trip_end_timestamp,
+                S.trip_seconds, S.trip_miles, S.pickup_community_area, S.dropoff_community_area,
+                S.fare, S.tips, S.tolls, S.extras, S.trip_total, S.payment_type, S.company
+            )
+    """
+
+    merge_job = client.query(merge_query)
+    merge_job.result()
+
+    # Limpiar staging
+    client.delete_table(staging_id)
+    logger.info("Staging eliminado")
 
     tabla = client.get_table(table_id)
-    logger.info(f"✅ Cargadas {tabla.num_rows} filas en {table_id}")
-    logger.info(f"✅ Tabla particionada por trip_start_timestamp")
+    logger.info(f"✅ Tabla final: {tabla.num_rows} filas")
+    logger.info(f"✅ MERGE completado sin duplicados")
 
 
 with DAG(
