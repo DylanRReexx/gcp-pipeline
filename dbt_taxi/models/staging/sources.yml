@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: taxi_pipeline
+    database: savvy-kit-494301-m6
+    schema: taxi_pipeline
+    tables:
+      - name: raw_taxi_trips
+        description: "Raw Chicago taxi trips loaded by Airflow pipeline"
