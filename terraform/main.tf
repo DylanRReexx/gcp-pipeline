@@ -8,18 +8,18 @@ terraform {
 }
 
 provider "google" {
-  project = "savvy-kit-494301-m6"
-  region  = "us-central1"
+  project = var.project_id
+  region  = var.region
 }
 
 # Dataset de BigQuery
 resource "google_bigquery_dataset" "taxi_pipeline" {
   dataset_id  = "taxi_pipeline_tf"
   description = "Chicago Taxi Pipeline dataset managed by Terraform"
-  location    = "US"
+  location    = var.location
 
   labels = {
-    env     = "portfolio"
+    env     = var.environment
     managed = "terraform"
   }
 }
@@ -27,12 +27,12 @@ resource "google_bigquery_dataset" "taxi_pipeline" {
 # Bucket de Cloud Storage
 resource "google_storage_bucket" "taxi_data" {
   name                        = "taxi-pipeline-data-dylan"
-  location                    = "US"
+  location                    = var.location
   force_destroy               = true
   uniform_bucket_level_access = true
 
   labels = {
-    env     = "portfolio"
+    env     = var.environment
     managed = "terraform"
   }
 }
