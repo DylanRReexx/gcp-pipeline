@@ -55,6 +55,12 @@ cover/
 *.mo
 *.pot
 
+# Terraform
+terraform/.terraform/
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/*.tfvars
+
 # Django stuff:
 *.log
 local_settings.py
