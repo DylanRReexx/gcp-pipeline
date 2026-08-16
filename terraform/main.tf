@@ -36,3 +36,31 @@ resource "google_storage_bucket" "taxi_data" {
     managed = "terraform"
   }
 }
+
+# Service Account para el pipeline
+resource "google_service_account" "pipeline_sa" {
+  account_id   = "taxi-pipeline-sa"
+  display_name = "Taxi Pipeline Service Account"
+  description  = "Service account for Chicago Taxi Pipeline managed by Terraform"
+}
+
+# Permisos BigQuery
+resource "google_project_iam_member" "bigquery_editor" {
+  project = var.project_id
+  role    = "roles/bigquery.dataEditor"
+  member  = "serviceAccount:${google_service_account.pipeline_sa.email}"
+}
+
+# Permisos Storage
+resource "google_project_iam_member" "storage_editor" {
+  project = var.project_id
+  role    = "roles/storage.objectAdmin"
+  member  = "serviceAccount:${google_service_account.pipeline_sa.email}"
+}
+
+# Permisos BigQuery Job (para correr queries)
+resource "google_project_iam_member" "bigquery_job_user" {
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.pipeline_sa.email}"
+}
